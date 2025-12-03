@@ -509,3 +509,5 @@ taskkill /PID <PID> /F
 Інструменти: Git, Docker, GitHub Actions, Terraform, AWS EC2, PostgreSQL.
 
 **Дата завершення:** Листопад 2025
+
+<!-- CI/CD test -->
