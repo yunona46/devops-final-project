@@ -1,0 +1,139 @@
+﻿name: Build and Deploy to EC2 with Docker Compose
+
+on:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+    
+    - name: Extract metadata
+      id: meta
+      run: |
+        echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+        echo "📝 Git commit hash: $(git rev-parse --short HEAD)"
+    
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        push: true
+        tags: |
+          ${{ secrets.DOCKERHUB_USERNAME }}/nodeapp:${{ steps.meta.outputs.sha_short }}
+          ${{ secrets.DOCKERHUB_USERNAME }}/nodeapp:latest
+    
+    - name: Deploy to EC2 with Docker Compose
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USER }}
+        key: ${{ secrets.EC2_SSH_KEY }}
+        port: 22
+        command_timeout: 30m
+        script: |
+          # Створюємо директорію
+          mkdir -p ~/nodeapp
+          cd ~/nodeapp
+          
+          # Встановлюємо Docker якщо потрібно
+          if ! command -v docker &> /dev/null; then
+            echo "📦 Installing Docker..."
+            sudo apt-get update
+            sudo apt-get install -y ca-certificates curl gnupg
+            sudo install -m 0755 -d /etc/apt/keyrings
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+            sudo chmod a+r /etc/apt/keyrings/docker.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            sudo apt-get update
+            sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            sudo usermod -aG docker ubuntu
+          fi
+          
+          # Видаляємо старі контейнери
+          sudo docker rm -f nodeapp postgres-db 2>/dev/null || true
+          
+          # Створюємо docker-compose.yml
+          cat > docker-compose.yml << 'COMPOSE_EOF'
+          version: '3.8'
+          
+          services:
+            app:
+              image: ${{ secrets.DOCKERHUB_USERNAME }}/nodeapp:${{ steps.meta.outputs.sha_short }}
+              container_name: nodeapp
+              ports:
+                - "3000:3000"
+              environment:
+                - NODE_ENV=production
+                - DB_HOST=db
+                - DB_PORT=5432
+                - DB_NAME=mydb
+                - DB_USER=postgres
+                - DB_PASSWORD=postgres123
+              depends_on:
+                db:
+                  condition: service_healthy
+              restart: unless-stopped
+              networks:
+                - app-network
+          
+            db:
+              image: postgres:15-alpine
+              container_name: postgres-db
+              environment:
+                - POSTGRES_DB=mydb
+                - POSTGRES_USER=postgres
+                - POSTGRES_PASSWORD=postgres123
+              ports:
+                - "5432:5432"
+              volumes:
+                - postgres_data:/var/lib/postgresql/data
+              healthcheck:
+                test: ["CMD-SHELL", "pg_isready -U postgres"]
+                interval: 10s
+                timeout: 5s
+                retries: 5
+              restart: unless-stopped
+              networks:
+                - app-network
+          
+          volumes:
+            postgres_data:
+          
+          networks:
+            app-network:
+              driver: bridge
+          COMPOSE_EOF
+          
+          # Завантажуємо образ
+          echo "📥 Pulling image..."
+          sudo docker pull ${{ secrets.DOCKERHUB_USERNAME }}/nodeapp:${{ steps.meta.outputs.sha_short }}
+          
+          # Запускаємо через docker compose
+          echo "🚀 Starting services..."
+          sudo docker compose down
+          sudo docker compose up -d
+          
+          # Чекаємо
+          echo "⏳ Waiting for services..."
+          sleep 15
+          
+          # Статус
+          echo "📊 Services status:"
+          sudo docker compose ps
+          
+          echo "✅ Deployment completed!"
+          echo "🌐 Application: http://${{ secrets.EC2_HOST }}:3000"
