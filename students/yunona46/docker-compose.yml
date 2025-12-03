@@ -1,6 +1,4 @@
-﻿version: '3.8'
-
-services:
+﻿services:
   app:
     # Для локального тестування використовуємо build, для production - image з змінними
     image: ${DOCKERHUB_USERNAME:-yunona46}/nodeapp:${IMAGE_TAG:-latest}
